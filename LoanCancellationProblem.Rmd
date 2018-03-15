@@ -1,0 +1,402 @@
+---
+title: "Preliminary Analysis of Loan Cancellation Data"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+# Data pre-processing and feature engineering
+
+## Load Data
+
+```{r, echo=TRUE}
+rm(list=ls())
+my.df = read.csv("new_theorem_data.csv", header = TRUE, nrow = -1, stringsAsFactors = FALSE)
+```
+
+## Check strucutre of the data
+
+```{r}
+str(my.df)
+```
+
+
+## deal with columns with NA
+
+#### Find columns with NA
+```{r}
+na.count = apply(my.df, 2, function(x) sum(is.na(x)))
+na.count[na.count > 0]
+```
+
+#### Analysis
+
+Notice that ProsperScore and NumMonthsEmployed have very low NA count, so it is safe to drop those rows. 
+
+For the other columns with more than 200k NAs, I feel it is OK to drop those columns for preliminary analysis. In addition, these information are somewhat encoded into the previous two columns NumPriorProsperLoansActive and NumPriorProsperLoans. Of course, if we really want to squeeze some extra prediction power, we need to deal with them more carefully. 
+
+The interesting one is FracDebtToIncomeRatio, with only 15607 NAs, which is approximately 6% of the total examples. I feel this variable is very important so I cannot drop the column entirely. However, it is not ideal to drop all the rows with NA in this variable either due to the relatively large number. For the prelimiary analysis, I am going to replace NAs with the median value for now. In more serious analysis, I will probably also try to separate the dataset into two subsets depending on whether this variable is NA or not and model them separately.
+
+#### remove NAs
+
+```{r}
+df.no.na = my.df[, -which(na.count > 200000)]
+df.no.na = df.no.na[-which(is.na(df.no.na$ProsperScore) | is.na(df.no.na$NumMonthsEmployed)),]
+m = median(df.no.na$FracDebtToIncomeRatio, na.rm = TRUE)
+for(i in 1:nrow(df.no.na)){
+        if(is.na(df.no.na[i, "FracDebtToIncomeRatio"]))
+                df.no.na[i, "FracDebtToIncomeRatio"] = m
+}
+```
+
+#### double check
+```{r}
+na.count = apply(df.no.na, 2, function(x) sum(is.na(x)))
+na.count[na.count > 0]
+```
+
+## remove the first two columns
+
+Obviously, the ListingNumber and ID should not contain any information, so they are removed.
+```{r}
+df.no.na = df.no.na[,-c(1,2)]
+```
+
+```{r}
+# str(df.no.na)
+```
+
+## Analysis of DateCreditPulled, DateListingStart, DateListingCreation and DateFirstCredit
+
+These four columns are interesting. My hunch is that there maybe some information in the difference between the DateCreditPulled and DateListingStart. The reasoning is bigger difference may imply more complicated credit history, thus more uncertainty.
+
+Also, I am adding difference between DateListingStart and DateFirstCredit just in case.
+
+#### Convert all date columns into datetime objects except WholeLoan columns
+
+```{r}
+dates.colnames = c("DateCreditPulled", "DateListingStart", "DateListingCreation", "DateFirstCredit")
+# dates.colnames = grep("Date", colnames(df.no.na), value = TRUE)
+for(colname in dates.colnames){
+        df.no.na[,colname] = as.POSIXct(df.no.na[,colname])
+}
+df.no.na$NumListingTimeDiff = as.numeric(df.no.na$DateListingStart - df.no.na$DateCreditPulled) / 24
+df.no.na$NumFirstCreditTimeDiff = as.numeric(df.no.na$DateListingStart - df.no.na$DateFirstCredit) /24
+# str(df.no.na)
+```
+
+Now we remove the four dates columns
+```{r}
+df.no.na = df.no.na[, -which(colnames(df.no.na) %in% dates.colnames)]
+```
+
+
+## Dealing with WholeLoan columns
+
+```{r}
+head(df.no.na[,grep("WholeLoan", colnames(df.no.na), value = TRUE)])
+```
+
+I am going to remove the two columns with DateWholeLoan due to the amount of missing values in DateWholeLoanEnd, but will keep BoolEverWholeLoan. There is loss of information, but I think keeping BoolEverWholeLoan should do a reasonable job.
+
+```{r}
+DateWholeLoan.colnames = grep("DateWholeLoan", colnames(df.no.na), value = TRUE)
+df.no.na = df.no.na[, -which(colnames(df.no.na) %in% DateWholeLoan.colnames)]
+# str(df.no.na)
+```
+
+## Difference between Lender Yield and BorrowerRate
+
+The spread between these two rates may carry extra information.
+
+```{r}
+df.no.na$NumLenderBorrowerSpread = df.no.na$BorrowerRate - df.no.na$LenderYield
+# str(df.no.na)
+```
+
+
+## StrBorrowerCity
+
+This variable is very problematic. There are a total of more than 26k different cities in this variable while threr are only 250k examples. So on average, there are only 10 example per city, which is obviously not enough to draw any statistical conclusion from. For now, I am going to remove this variable. However, in a more serious analysis, either we have a lot more data for each city, or we need to put each of these cities into a much smaller number of categories. For example, we can divide them by size (large, medium, small), location (rural, suburban, metropolitan), economic growth(high, medium, low) etc.
+
+```{r}
+df.no.na$StrBorrowerCity = NULL
+# df.no.na$StrOccupation = NULL
+# df.no.na$StrState = NULL
+```
+
+## Unbalanced response variable
+
+Notice the unbalanced distribution of the response variable
+
+```{r}
+tmp = summary(factor(df.no.na$EnumListingStatus))
+tmp/sum(tmp)
+```
+
+There is certainly some imbalance, with 2/3 of 6 and 1/3 of 7. But this is certainly not nearly as bad as many other applications, such as fraud detection.
+
+## Convert Categorical variables to factors
+
+use regular expressions to find columns that starts with "Enum", "Bool", "Str", "CreditGrade".
+
+PS: It is probably useful to add "Ord" in front of "CreditGrade", which indicates ordinal category variable and "Num" in front of both lenderRate and borrowerRate. Just to make the naming convention consistent
+
+```{r}
+factor.cols = grep("^(Enum|Bool|Str|CreditGrade)", colnames(df.no.na))
+for(i in factor.cols){
+        factor.levels = unique(as.character(df.no.na[,i]))
+        df.no.na[,i] = factor(df.no.na[,i], 
+                              levels = factor.levels,
+                              labels = make.names(factor.levels))
+}
+str(df.no.na)
+```
+
+
+# use gbm for prediction
+
+Given the large number of examples and variables, I am using 90% of the examples for training and 10% of the examples for testing. The rationale is that the variance of the predicted error rates using the testing data set is roughly proportional to 1/sqrt(N). Increasing N from 20000 to 100000 does not really tell us a whole lot more, but the additional data in training really helps. 
+
+```{r}
+library(caret)
+library(corrplot)			# plot correlations
+library(doParallel)		# parallel processing
+library(dplyr)        # Used by caret
+library(gbm)				  # GBM Models
+library(pROC)				  # plot the ROC curve
+
+
+
+trainIndex = createDataPartition(df.no.na$EnumListingStatus,p=.1,list=FALSE)
+trainData = df.no.na[trainIndex,]
+testData  = df.no.na[-trainIndex,]
+
+trainX =trainData[,-1]        # Pull out the dependent variable
+testX = testData[,-1]
+trainY = trainData[,1]
+testY = testData[,1]
+# sapply(trainX,summary) # Look at a summary of the training data
+
+## GENERALIZED BOOSTED RGRESSION MODEL (BGM)  
+
+# Set up training control
+ctrl = trainControl(method = "repeatedcv",   # 10fold cross validation
+                     number = 5,							# do 5 repititions of cv
+                     summaryFunction=twoClassSummary,	# Use AUC to pick the best model
+                     classProbs=TRUE,
+                     allowParallel = TRUE)
+
+# Use the expand.grid to specify the search space	
+# Note that the default search grid selects multiple values of each tuning parameter
+
+grid = expand.grid(interaction.depth=c(1,2), # Depth of variable interactions
+                    n.trees=c(10,20),	        # Num trees to fit
+                    shrinkage=c(0.01,0.1),		# Try 2 values for learning rate 
+                    n.minobsinnode = 20)
+
+# Set up to do parallel processing   
+registerDoParallel(4)		# Registrer a parallel backend for train
+getDoParWorkers()
+set.seed(20180211)
+gbm.tune = train(x=trainX,y=trainData$EnumListingStatus,
+                  method = "gbm",
+                  metric = "ROC",
+                  trControl = ctrl,
+                  tuneGrid=grid,
+                  verbose=FALSE)
+
+
+# Look at the tuning results
+# Note that ROC was the performance criterion used to select the optimal model.   
+
+gbm.tune$bestTune
+plot(gbm.tune)  		# Plot the performance of the training models
+res = gbm.tune$results
+res
+
+### GBM Model Predictions and Performance
+# Make predictions using the test data set
+gbm.pred = predict(gbm.tune,testX)
+
+#Look at the confusion matrix  
+confusionMatrix(gbm.pred,testData$EnumListingStatus)   
+
+#Draw the ROC curve 
+gbm.probs = predict(gbm.tune,testX,type="prob")
+head(gbm.probs)
+
+gbm.ROC = roc(predictor=gbm.probs$X6,
+               response=testData$EnumListingStatus)
+
+#Area under the curve: 0.8731
+plot(gbm.ROC,main="GBM ROC")
+```
+
+And the histogram
+```{r}
+# Plot the propability of prediction X6 conditional on the true class
+histogram(~gbm.probs$X6|testData$EnumListingStatus,xlab="Probability of Predicting EnumListStatus X6")
+```
+
+So the auc is slightly better than just using the ratio from the training set, going from 0.6656764 to 0.6659.
+```{r}
+tmp = summary(trainY)
+tmp/sum(tmp)
+gbm.ROC$auc
+```
+
+## Use weighting that considers the imbalance
+
+We use a weighted version of gbm to see if the imbalance in the training set has any impact.
+
+```{r}
+model_weights = ifelse(trainY == "X7",
+                        (1/table(trainY)[1]) * 0.5,
+                        (1/table(trainY)[2]) * 0.5)
+set.seed(20180211)
+gbm.tune.weighted = train(x=trainX,y=trainY,
+                  method = "gbm",
+                  metric = "ROC",
+                  trControl = ctrl,
+                  tuneGrid=grid,
+                  weights = model_weights,
+                  verbose=FALSE)
+
+
+# Look at the tuning results
+# Note that ROC was the performance criterion used to select the optimal model.   
+
+gbm.tune.weighted$bestTune
+plot(gbm.tune.weighted)  		# Plot the performance of the training models
+res.weighted = gbm.tune.weighted$results
+res.weighted
+
+### GBM Model Predictions and Performance
+# Make predictions using the test data set
+gbm.pred.weighted = predict(gbm.tune.weighted,testX)
+
+#Look at the confusion matrix  
+confusionMatrix(gbm.pred.weighted,testData$EnumListingStatus)   
+
+#Draw the ROC curve 
+gbm.probs.weighted = predict(gbm.tune.weighted,testX,type="prob")
+head(gbm.probs.weighted)
+
+gbm.ROC.weighted = roc(predictor=gbm.probs.weighted$X6,
+               response=testData$EnumListingStatus)
+gbm.ROC.weighted$auc
+#Area under the curve: 0.6656966
+plot(gbm.ROC.weighted,main="GBM.weighted ROC")
+```
+ And the histogram of the predictions
+ 
+```{r}
+# Plot the propability of prediction X6 conditional on the true class
+histogram(~gbm.probs.weighted$X6|testData$EnumListingStatus,xlab="Probability of Predicting EnumListStatus X6 weighted")
+
+c(gbm.ROC$auc, gbm.ROC.weighted$auc)
+```
+
+So we are getting a bit of performance by considering the imbalance in the examples
+
+## Variable importance
+```{r}
+summary(gbm.tune.weighted)
+```
+
+It seems that gbm considers only a small number of variables important, they are
+```{r}
+################################
+### use reduced feature sets
+
+gbm.tune.weighted.summary = summary(gbm.tune.weighted)
+(var.vec = c("EnumListingStatus",as.character(gbm.tune.weighted.summary$var[gbm.tune.weighted.summary$rel.inf > 0.1])))
+```
+
+we are going to try using weighting and the reduced set of variable and see what happens
+```{r}
+trainData.reduced = trainData[, var.vec]
+testData.reduced = testData[, var.vec]
+trainX.reduced = trainData.reduced[,-1]        # Pull out the dependent variable
+testX.reduced = testData.reduced[,-1]
+trainY.reduced = trainData.reduced[,1]        # Pull out the dependent variable
+testY.reduced = testData.reduced[,1]
+
+# Set up training control
+ctrl = trainControl(method = "repeatedcv",   # 10fold cross validation
+                     number = 5,							# do 5 repititions of cv
+                     summaryFunction=twoClassSummary,	# Use AUC to pick the best model
+                     classProbs=TRUE,
+                     allowParallel = TRUE)
+
+# Use the expand.grid to specify the search space	
+# Note that the default search grid selects multiple values of each tuning parameter
+
+grid = expand.grid(interaction.depth=c(1,2), # Depth of variable interactions
+                    n.trees=c(10,20),	        # Num trees to fit
+                    shrinkage=c(0.01,0.1),		# Try 2 values for learning rate 
+                    n.minobsinnode = 20)
+#											
+set.seed(20180211)  # set the seed
+
+# Set up to do parallel processing   
+registerDoParallel(4)		# Registrer a parallel backend for train
+getDoParWorkers()
+set.seed(20180211)
+gbm.tune.reduced = train(x=trainX.reduced,y=trainY.reduced,
+                  method = "gbm",
+                  metric = "ROC",
+                  trControl = ctrl,
+                  tuneGrid=grid,
+                   weights = model_weights,
+                  verbose=FALSE)
+
+
+# Look at the tuning results
+# Note that ROC was the performance criterion used to select the optimal model.   
+
+gbm.tune.reduced$bestTune
+plot(gbm.tune.reduced)  		# Plot the performance of the training models
+res = gbm.tune.reduced$results
+res
+
+### GBM Model Predictions and Performance
+# Make predictions using the test data set
+gbm.pred.reduced = predict(gbm.tune.reduced,testX)
+
+#Look at the confusion matrix  
+confusionMatrix(gbm.pred.reduced,testData.reduced$EnumListingStatus)   
+
+#Draw the ROC curve 
+gbm.probs.reduced = predict(gbm.tune.reduced,testX.reduced,type="prob")
+head(gbm.probs.reduced)
+
+gbm.ROC.reduced = roc(predictor=gbm.probs.reduced$X6,
+               response=testData.reduced$EnumListingStatus)
+gbm.ROC.reduced$auc
+#Area under the curve: 0.6676
+plot(gbm.ROC.reduced,main="GBM.reduced ROC")
+```
+
+And the histogram
+```{r}
+# Plot the propability of prediction X6 conditional on the true class
+histogram(~gbm.probs.reduced$X6|testData.reduced$EnumListingStatus,xlab="Probability of Predicting EnumListStatus X6")
+```
+
+Finally, the auc of three different methods
+```{r}
+c(gbm.ROC$auc, gbm.ROC.weighted$auc, gbm.ROC.reduced$auc)
+```
+
+
+# Conclusion and future work
+
+Working on a real-world data set like this has been an exciting and rewarding experience for me. 
+
+- One of the new features created, the spread between LenderYield and BorrowerRate, turns out to be among most important variable from gbm. This really shows the importance of appropriate feature engineering
+- Better feature engineering for StrBorrowerCity
+- Explore the use of the dropped features
+- Explore other machine learning algorithms and/or ensembles
+
