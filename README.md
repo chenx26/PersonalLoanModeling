@@ -1,3 +1,3 @@
 # PersonalLoanModeling
 
-This is a project to model the loan cancellation of Lending Club (lendingclub.com) applications.
+This is a project to model the probability of cancellation for personal loan applications at Lending Club (lendingclub.com).
